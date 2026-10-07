@@ -16,6 +16,95 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "review.db"
 VALID_DECISIONS = {"accept", "reject", "minor_revision", "major_revision"}
 
+SCHEMA_SCRIPT = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('author','reviewer','chair')),
+    load_limit INTEGER NOT NULL DEFAULT 3 CHECK (load_limit >= 0)
+);
+CREATE TABLE IF NOT EXISTS papers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    author_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    abstract TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK (status IN ('submitted','under_review','decided','withdrawn')),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    version INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (paper_id, version)
+);
+CREATE TABLE IF NOT EXISTS conflicts (
+    reviewer_id TEXT NOT NULL REFERENCES users(id),
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    reason TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (reviewer_id, paper_id)
+);
+CREATE TABLE IF NOT EXISTS bids (
+    reviewer_id TEXT NOT NULL REFERENCES users(id),
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    interest TEXT NOT NULL CHECK (interest IN ('want','maybe','decline')),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (reviewer_id, paper_id)
+);
+CREATE TABLE IF NOT EXISTS assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    reviewer_id TEXT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'invited'
+        CHECK (status IN ('invited','accepted','declined','completed','expired')),
+    score INTEGER CHECK (score IS NULL OR score BETWEEN 1 AND 5),
+    review_text TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (paper_id, reviewer_id)
+);
+CREATE TABLE IF NOT EXISTS assignment_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL REFERENCES papers(id),
+    reviewer_id TEXT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued','invited','skipped','cancelled')),
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (paper_id, reviewer_id)
+);
+CREATE TABLE IF NOT EXISTS rebuttals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL UNIQUE REFERENCES papers(id),
+    author_id TEXT NOT NULL REFERENCES users(id),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER NOT NULL UNIQUE REFERENCES papers(id),
+    decision TEXT NOT NULL CHECK (decision IN ('accept','reject','minor_revision','major_revision')),
+    note TEXT NOT NULL DEFAULT '',
+    decided_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id INTEGER,
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (paper_id) REFERENCES papers(id)
+);
+"""
+
 
 class BusinessError(Exception):
     def __init__(self, message: str, status: int = 400, code: str = "bad_request"):
@@ -45,85 +134,36 @@ class ReviewStore:
 
     def init_schema(self) -> None:
         with self._schema_lock, self.connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK (role IN ('author','reviewer','chair')),
-                    load_limit INTEGER NOT NULL DEFAULT 3 CHECK (load_limit >= 0)
-                );
-                CREATE TABLE IF NOT EXISTS papers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    author_id TEXT NOT NULL REFERENCES users(id),
-                    title TEXT NOT NULL,
-                    abstract TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'submitted'
-                        CHECK (status IN ('submitted','under_review','decided','withdrawn')),
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_versions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    paper_id INTEGER NOT NULL REFERENCES papers(id),
-                    version INTEGER NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE (paper_id, version)
-                );
-                CREATE TABLE IF NOT EXISTS conflicts (
-                    reviewer_id TEXT NOT NULL REFERENCES users(id),
-                    paper_id INTEGER NOT NULL REFERENCES papers(id),
-                    reason TEXT NOT NULL,
-                    created_by TEXT NOT NULL REFERENCES users(id),
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (reviewer_id, paper_id)
-                );
-                CREATE TABLE IF NOT EXISTS bids (
-                    reviewer_id TEXT NOT NULL REFERENCES users(id),
-                    paper_id INTEGER NOT NULL REFERENCES papers(id),
-                    interest TEXT NOT NULL CHECK (interest IN ('want','maybe','decline')),
-                    note TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (reviewer_id, paper_id)
-                );
-                CREATE TABLE IF NOT EXISTS assignments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    paper_id INTEGER NOT NULL REFERENCES papers(id),
-                    reviewer_id TEXT NOT NULL REFERENCES users(id),
-                    status TEXT NOT NULL DEFAULT 'invited'
-                        CHECK (status IN ('invited','accepted','declined','completed')),
-                    score INTEGER CHECK (score IS NULL OR score BETWEEN 1 AND 5),
-                    review_text TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE (paper_id, reviewer_id)
-                );
-                CREATE TABLE IF NOT EXISTS rebuttals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    paper_id INTEGER NOT NULL UNIQUE REFERENCES papers(id),
-                    author_id TEXT NOT NULL REFERENCES users(id),
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS decisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    paper_id INTEGER NOT NULL UNIQUE REFERENCES papers(id),
-                    decision TEXT NOT NULL CHECK (decision IN ('accept','reject','minor_revision','major_revision')),
-                    note TEXT NOT NULL DEFAULT '',
-                    decided_by TEXT NOT NULL REFERENCES users(id),
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    paper_id INTEGER,
-                    actor_id TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    detail TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (paper_id) REFERENCES papers(id)
-                );
-                """
-            )
+            conn.executescript(SCHEMA_SCRIPT)
+            self._migrate_assignments(conn)
+
+    def _migrate_assignments(self, conn: sqlite3.Connection) -> None:
+        """旧库 assignments 表缺少 expired 状态时原地重建（保留数据）。"""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='assignments'"
+        ).fetchone()
+        if not row or "'expired'" in row["sql"]:
+            return
+        conn.executescript(
+            """
+            CREATE TABLE assignments_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                paper_id INTEGER NOT NULL REFERENCES papers(id),
+                reviewer_id TEXT NOT NULL REFERENCES users(id),
+                status TEXT NOT NULL DEFAULT 'invited'
+                    CHECK (status IN ('invited','accepted','declined','completed','expired')),
+                score INTEGER CHECK (score IS NULL OR score BETWEEN 1 AND 5),
+                review_text TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (paper_id, reviewer_id)
+            );
+            INSERT INTO assignments_new (id,paper_id,reviewer_id,status,score,review_text,created_at,updated_at)
+            SELECT id,paper_id,reviewer_id,status,score,review_text,created_at,updated_at FROM assignments;
+            DROP TABLE assignments;
+            ALTER TABLE assignments_new RENAME TO assignments;
+            """
+        )
 
     def seed(self) -> None:
         self.init_schema()
@@ -238,14 +278,43 @@ class ReviewStore:
             reviewer = self._user(conn, reviewer_id)
             self._require(reviewer, "reviewer")
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "INSERT INTO conflicts(reviewer_id,paper_id,reason,created_by,created_at) VALUES(?,?,?,?,?)",
                     (reviewer_id, paper_id, reason.strip(), chair_id, utcnow()),
                 )
             except sqlite3.IntegrityError:
+                conn.rollback()
                 raise BusinessError("利益冲突已登记", 409, "conflict_exists")
+            # 利益冲突一经登记，该评审人在该稿的待回复邀请立即失效。
+            invited = conn.execute(
+                "SELECT id FROM assignments WHERE paper_id=? AND reviewer_id=? AND status='invited'",
+                (paper_id, reviewer_id),
+            ).fetchall()
+            for inv in invited:
+                conn.execute(
+                    "UPDATE assignments SET status='expired', updated_at=? WHERE id=?",
+                    (utcnow(), inv["id"]),
+                )
+                self._audit(
+                    conn, paper_id, chair_id, "assignment.expire",
+                    {"assignment_id": inv["id"], "reviewer_id": reviewer_id,
+                     "reason": "conflict_added", "conflict_reason": reason.strip()},
+                )
+            conn.execute(
+                "UPDATE assignment_queue SET status='cancelled', reason='conflict_added', updated_at=? "
+                "WHERE paper_id=? AND reviewer_id=? AND status='queued'",
+                (utcnow(), paper_id, reviewer_id),
+            )
             self._audit(conn, paper_id, chair_id, "conflict.add", {"reviewer_id": reviewer_id, "reason": reason.strip()})
-            return {"paper_id": paper_id, "reviewer_id": reviewer_id, "reason": reason.strip()}
+            conn.commit()
+        # 仅当有邀请失效、腾出空位时才补人：原因随审计历史留痕。
+        if invited:
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._fill_paper(conn, paper_id, chair_id, "backfill:conflict_added")
+                conn.commit()
+        return {"paper_id": paper_id, "reviewer_id": reviewer_id, "reason": reason.strip()}
 
     def bid(self, reviewer_id: str, paper_id: int, interest: str, note: str = "") -> dict:
         if interest not in {"want", "maybe", "decline"}:
@@ -300,6 +369,252 @@ class ReviewStore:
                 conn.rollback()
                 raise
 
+    # ---- 自动分配：投标优先、冲突跳过、负载排队、断点续跑 ----
+
+    TARGET_REVIEWERS = 2
+    ACTIVE_LOAD_STATUSES = ("invited", "accepted")
+    FILLED_STATUSES = ("invited", "accepted", "completed")
+
+    def _current_load(self, conn: sqlite3.Connection, reviewer_id: str) -> int:
+        return conn.execute(
+            "SELECT COUNT(*) FROM assignments WHERE reviewer_id=? AND status IN ('invited','accepted')",
+            (reviewer_id,),
+        ).fetchone()[0]
+
+    def _upsert_queue(self, conn: sqlite3.Connection, paper_id: int, reviewer_id: str, status: str, reason: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO assignment_queue(paper_id,reviewer_id,status,reason,created_at,updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(paper_id,reviewer_id) DO UPDATE
+               SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at
+            """,
+            (paper_id, reviewer_id, status, reason, utcnow(), utcnow()),
+        )
+
+    def _invite_candidate(self, conn: sqlite3.Connection, paper_id: int, reviewer_id: str, actor_id: str, reason: str) -> int | None:
+        """邀请一名候选人；已存在同稿分配时不重复占负载，返回 assignment_id。"""
+        cur = conn.execute(
+            """
+            INSERT INTO assignments(paper_id,reviewer_id,status,created_at,updated_at)
+            VALUES(?,?, 'invited', ?, ?)
+            ON CONFLICT(paper_id,reviewer_id) DO UPDATE
+               SET status='invited', updated_at=excluded.updated_at
+             WHERE assignments.status='expired'
+            """,
+            (paper_id, reviewer_id, utcnow(), utcnow()),
+        )
+        if cur.rowcount == 0:
+            return None
+        assignment_id = conn.execute(
+            "SELECT id FROM assignments WHERE paper_id=? AND reviewer_id=?", (paper_id, reviewer_id)
+        ).fetchone()["id"]
+        self._upsert_queue(conn, paper_id, reviewer_id, "invited", reason)
+        conn.execute("UPDATE papers SET status='under_review' WHERE id=? AND status='submitted'", (paper_id,))
+        self._audit(
+            conn, paper_id, actor_id, "assignment.auto_invite",
+            {"assignment_id": assignment_id, "reviewer_id": reviewer_id, "reason": reason},
+        )
+        return assignment_id
+
+    def _fill_paper(self, conn: sqlite3.Connection, paper_id: int, actor_id: str, reason: str) -> dict:
+        """为一篇论文凑够 TARGET_REVIEWERS 名评审人。
+
+        投标 want 优先于 maybe，maybe 优先于未投标；decline 与冲突、已分配者跳过；
+        负载已满者进入 assignment_queue 排队，容量释放后由 _process_queue 补位。
+        """
+        result = {"paper_id": paper_id, "invited": [], "queued": [], "skipped": []}
+        filled = conn.execute(
+            "SELECT COUNT(*) FROM assignments WHERE paper_id=? AND status IN ('invited','accepted','completed')",
+            (paper_id,),
+        ).fetchone()[0]
+        if filled >= self.TARGET_REVIEWERS:
+            return result
+        candidates = conn.execute(
+            """
+            SELECT u.id, u.load_limit, COALESCE(b.interest,'none') AS interest
+            FROM users u
+            LEFT JOIN bids b ON b.reviewer_id=u.id AND b.paper_id=?
+            WHERE u.role='reviewer'
+              AND COALESCE(b.interest,'none') != 'decline'
+              AND NOT EXISTS (SELECT 1 FROM conflicts c WHERE c.reviewer_id=u.id AND c.paper_id=?)
+              AND NOT EXISTS (SELECT 1 FROM assignments a
+                               WHERE a.reviewer_id=u.id AND a.paper_id=? AND a.status != 'expired')
+            ORDER BY CASE COALESCE(b.interest,'none')
+                        WHEN 'want' THEN 0 WHEN 'maybe' THEN 1 ELSE 2 END, u.id
+            """,
+            (paper_id, paper_id, paper_id),
+        ).fetchall()
+        for cand in candidates:
+            if filled >= self.TARGET_REVIEWERS:
+                break
+            load = self._current_load(conn, cand["id"])
+            if load >= cand["load_limit"]:
+                self._upsert_queue(conn, paper_id, cand["id"], "queued", "at_capacity")
+                result["queued"].append(cand["id"])
+                continue
+            assignment_id = self._invite_candidate(conn, paper_id, cand["id"], actor_id, reason)
+            if assignment_id is None:
+                continue
+            result["invited"].append(cand["id"])
+            filled += 1
+        if filled < self.TARGET_REVIEWERS and not result["invited"] and not result["queued"]:
+            result["skipped"].append({"reason": "insufficient_reviewers", "needed": self.TARGET_REVIEWERS - filled})
+        return result
+
+    def _process_queue(self, conn: sqlite3.Connection, reviewer_id: str | None = None,
+                       paper_id: int | None = None, actor_id: str = "system") -> list[dict]:
+        """处理排队中的补位申请：冲突/满稿则作废，仍满负载则继续排队，否则发出邀请。"""
+        sql = """
+            SELECT q.id, q.paper_id, q.reviewer_id,
+                   u.load_limit,
+                   (SELECT COUNT(*) FROM assignments a
+                     WHERE a.reviewer_id=q.reviewer_id AND a.status IN ('invited','accepted')) AS load,
+                   (SELECT COUNT(*) FROM assignments a
+                     WHERE a.paper_id=q.paper_id AND a.status IN ('invited','accepted','completed')) AS filled,
+                   EXISTS(SELECT 1 FROM conflicts c
+                           WHERE c.reviewer_id=q.reviewer_id AND c.paper_id=q.paper_id) AS has_conflict
+            FROM assignment_queue q
+            JOIN users u ON u.id = q.reviewer_id
+            WHERE q.status='queued'
+        """
+        conds: list[str] = []
+        params: list = []
+        if reviewer_id:
+            conds.append("q.reviewer_id=?")
+            params.append(reviewer_id)
+        if paper_id:
+            conds.append("q.paper_id=?")
+            params.append(paper_id)
+        if conds:
+            sql += " AND " + " AND ".join(conds)
+        sql += " ORDER BY q.id"
+        actions: list[dict] = []
+        for row in conn.execute(sql, params).fetchall():
+            if row["has_conflict"]:
+                conn.execute(
+                    "UPDATE assignment_queue SET status='cancelled', reason='conflict_added', updated_at=? WHERE id=?",
+                    (utcnow(), row["id"]),
+                )
+                actions.append({"paper_id": row["paper_id"], "reviewer_id": row["reviewer_id"], "action": "cancelled"})
+            elif row["filled"] >= self.TARGET_REVIEWERS:
+                conn.execute(
+                    "UPDATE assignment_queue SET status='skipped', reason='paper_full', updated_at=? WHERE id=?",
+                    (utcnow(), row["id"]),
+                )
+                actions.append({"paper_id": row["paper_id"], "reviewer_id": row["reviewer_id"], "action": "skipped"})
+            elif row["load"] >= row["load_limit"]:
+                continue
+            else:
+                assignment_id = self._invite_candidate(conn, row["paper_id"], row["reviewer_id"], actor_id, "queue_fill")
+                if assignment_id is None:
+                    continue
+                conn.execute(
+                    "UPDATE assignment_queue SET status='invited', reason='queue_fill', updated_at=? WHERE id=?",
+                    (utcnow(), row["id"]),
+                )
+                actions.append({"paper_id": row["paper_id"], "reviewer_id": row["reviewer_id"], "action": "invited"})
+        return actions
+
+    def auto_assign(self, chair_id: str, paper_id: int | None = None,
+                    fail_after: int | None = None, reason: str = "auto_assign") -> dict:
+        """把投标、利益冲突、分配和评审人负载接成一次自动分配。
+
+        逐篇论文独立事务：中途失败已完成的邀请保留，重试从未完成的论文断点补齐；
+        fail_after 仅用于模拟写入中途失败。
+        """
+        with self.connect() as conn:
+            chair = self._user(conn, chair_id)
+            self._require(chair, "chair")
+            if paper_id is not None:
+                paper = conn.execute("SELECT status FROM papers WHERE id=?", (paper_id,)).fetchone()
+                if not paper:
+                    raise BusinessError("论文不存在", 404, "not_found")
+                if paper["status"] not in ("submitted", "under_review"):
+                    raise BusinessError("论文不存在或不可分配", 409, "paper_unavailable")
+                paper_ids = [paper_id]
+            else:
+                paper_ids = [
+                    r["id"] for r in conn.execute(
+                        "SELECT id FROM papers WHERE status IN ('submitted','under_review') ORDER BY id"
+                    ).fetchall()
+                ]
+            summary = {"papers": [], "invited": [], "queued": [], "skipped": []}
+            for pid in paper_ids:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    result = self._fill_paper(conn, pid, chair_id, reason)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                summary["papers"].append({k: result[k] for k in ("paper_id", "invited", "queued", "skipped")})
+                summary["invited"].extend(result["invited"])
+                summary["queued"].extend(result["queued"])
+                summary["skipped"].extend(result["skipped"])
+                if fail_after is not None and len(summary["invited"]) >= fail_after:
+                    raise BusinessError(
+                        "模拟写入中途失败：已完成的邀请已保留，重试将从断点补齐", 500, "simulated_failure"
+                    )
+            return summary
+
+    def set_load_limit(self, chair_id: str, reviewer_id: str, load_limit: int) -> dict:
+        """修改评审人负载上限；上限下调导致超载时，待回复邀请立即失效并补人。"""
+        if isinstance(load_limit, bool) or not isinstance(load_limit, int) or load_limit < 0:
+            raise BusinessError("负载上限必须为非负整数", 422, "invalid_load_limit")
+        with self.connect() as conn:
+            chair = self._user(conn, chair_id)
+            self._require(chair, "chair")
+            reviewer = self._user(conn, reviewer_id)
+            self._require(reviewer, "reviewer")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                old_limit = reviewer["load_limit"]
+                conn.execute("UPDATE users SET load_limit=? WHERE id=?", (load_limit, reviewer_id))
+                load = self._current_load(conn, reviewer_id)
+                expired_papers: list[int] = []
+                if load > load_limit:
+                    invites = conn.execute(
+                        "SELECT id, paper_id FROM assignments WHERE reviewer_id=? AND status='invited' ORDER BY id DESC",
+                        (reviewer_id,),
+                    ).fetchall()
+                    for inv in invites:
+                        if load <= load_limit:
+                            break
+                        conn.execute(
+                            "UPDATE assignments SET status='expired', updated_at=? WHERE id=?",
+                            (utcnow(), inv["id"]),
+                        )
+                        self._audit(
+                            conn, inv["paper_id"], chair_id, "assignment.expire",
+                            {"assignment_id": inv["id"], "reviewer_id": reviewer_id,
+                             "reason": "load_limit_decreased", "old_limit": old_limit, "new_limit": load_limit},
+                        )
+                        expired_papers.append(inv["paper_id"])
+                        load -= 1
+                self._audit(
+                    conn, None, chair_id, "reviewer.load_limit",
+                    {"reviewer_id": reviewer_id, "old_limit": old_limit, "new_limit": load_limit},
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        for pid in dict.fromkeys(expired_papers):
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._fill_paper(conn, pid, chair_id, "backfill:load_limit_decreased")
+                conn.commit()
+        if load_limit > old_limit:
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._process_queue(conn, reviewer_id=reviewer_id, actor_id=chair_id)
+                conn.commit()
+        return {"reviewer_id": reviewer_id, "load_limit": load_limit, "old_limit": old_limit}
+
+    def update_load_limit(self, chair_id: str, reviewer_id: str, load_limit: int) -> dict:
+        return self.set_load_limit(chair_id, reviewer_id, load_limit)
+
     def respond_assignment(self, reviewer_id: str, assignment_id: int, accepted: bool) -> dict:
         with self.connect() as conn:
             reviewer = self._user(conn, reviewer_id)
@@ -307,12 +622,21 @@ class ReviewStore:
             row = conn.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
             if not row or row["reviewer_id"] != reviewer_id:
                 raise BusinessError("分配不存在或不属于当前评审人", 404, "not_found")
+            if row["status"] == "expired":
+                raise BusinessError("邀请已失效（利益冲突或负载已变更）", 409, "invitation_expired")
             if row["status"] != "invited":
                 raise BusinessError("邀请已经处理", 409, "invitation_already_answered")
             status = "accepted" if accepted else "declined"
             conn.execute("UPDATE assignments SET status=?,updated_at=? WHERE id=?", (status, utcnow(), assignment_id))
             self._audit(conn, row["paper_id"], reviewer_id, "assignment.respond", {"assignment_id": assignment_id, "status": status})
-            return {"id": assignment_id, "status": status}
+            conn.commit()
+        if not accepted:
+            # 拒绝后负载释放，排队中的补位申请立即发出。
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._process_queue(conn, reviewer_id=reviewer_id, actor_id=reviewer_id)
+                conn.commit()
+        return {"id": assignment_id, "status": status}
 
     def submit_review(self, reviewer_id: str, assignment_id: int, score: int, text: str) -> dict:
         if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5:
@@ -332,7 +656,13 @@ class ReviewStore:
                 (score, text.strip(), utcnow(), assignment_id),
             )
             self._audit(conn, row["paper_id"], reviewer_id, "review.submit", {"assignment_id": assignment_id, "score": score})
-            return {"id": assignment_id, "status": "completed", "score": score}
+            conn.commit()
+        # 完成后该评审人负载释放，排队中的补位申请立即发出。
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._process_queue(conn, reviewer_id=reviewer_id, actor_id=reviewer_id)
+            conn.commit()
+        return {"id": assignment_id, "status": "completed", "score": score}
 
     def submit_rebuttal(self, author_id: str, paper_id: int, content: str) -> dict:
         if len(content.strip()) < 10:
@@ -457,6 +787,14 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 return self._send(201, store.decide(self._user_id(), paper_id, data.get("decision", ""), data.get("note", "")))
             if len(parts) == 4 and parts[3] == "history" and method == "GET":
                 return self._send(200, {"items": store.history(self._user_id(), paper_id)})
+        if parts == ["api", "assignments", "auto"] and method == "POST":
+            data = self._body()
+            return self._send(200, store.auto_assign(
+                self._user_id(), data.get("paper_id"), data.get("fail_after"), data.get("reason", "auto_assign")
+            ))
+        if len(parts) == 4 and parts[:2] == ["api", "users"] and parts[3] == "load-limit" and method == "POST":
+            data = self._body()
+            return self._send(200, store.set_load_limit(self._user_id(), parts[2], data.get("load_limit")))
         if len(parts) == 4 and parts[:2] == ["api", "assignments"] and method == "POST":
             assignment_id = int(parts[2])
             data = self._body()

@@ -24,6 +24,8 @@ python -m unittest -v
 - `POST /api/papers/{id}/bids`：评审意向。
 - `POST /api/papers/{id}/conflicts`：主席登记利益冲突。
 - `POST /api/papers/{id}/assignments`：主席邀请评审人，执行负载上限与冲突检查。
+- `POST /api/assignments/auto`：主席按投标、冲突、负载自动分配，每篇凑够两名评审人；满负载排队，失败可断点续跑。
+- `POST /api/users/{id}/load-limit`：主席修改评审人负载上限；超载时待回复邀请立即失效并补人。
 - `POST /api/assignments/{id}/respond`：接受或拒绝邀请。
 - `POST /api/assignments/{id}/review`：提交 1-5 分评审。
 - `POST /api/papers/{id}/rebuttal`：作者提交一次 Rebuttal。
@@ -33,3 +35,5 @@ python -m unittest -v
 ## 业务不变量
 
 评审人不能查看未分配论文的作者身份；利益冲突禁止投标和分配；邀请和完成状态不能跳步；每位评审人的未完成分配受 `load_limit` 限制；每篇论文只能提交一次 Rebuttal；决定必须至少基于两份已完成评审。
+
+自动分配以 `BEGIN IMMEDIATE` 串行化，配合 `UNIQUE(paper_id, reviewer_id)` 保证两位主席同时分配同一篇时只生成一份邀请、不重复占负载；投标 `want` 优先于 `maybe`，冲突与满负载跳过，满负载进入 `assignment_queue` 排队，容量释放后自动补位。登记利益冲突或下调负载上限后，该评审人的待回复邀请立即置为 `expired` 并按原因补人（原因写入审计历史）。自动分配逐篇提交，中途失败保留已完成部分，重试从未完成的论文断点补齐。
