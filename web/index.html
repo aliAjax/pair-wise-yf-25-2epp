@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>学术会议同行评审</title>
+<style>body{font:16px system-ui;max-width:900px;margin:32px auto;padding:0 16px}input,textarea,select,button{font:inherit;padding:8px;margin:4px}textarea{width:100%;height:90px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}pre{white-space:pre-wrap;background:#f4f4f4;padding:12px}</style></head>
+<body><h1>学术会议同行评审</h1><p>选择身份后，页面会通过 <code>X-User-Id</code> 调用 JSON API。演示账号：alice、bob、r1、r2、r3、chair。</p>
+<div class="grid"><section class="panel"><h2>提交论文</h2><select id="user"><option>alice</option><option>bob</option><option>r1</option><option>r2</option><option>r3</option><option>chair</option></select><input id="title" placeholder="标题"><textarea id="abstract" placeholder="摘要（至少20字）"></textarea><button onclick="submitPaper()">提交</button></section>
+<section class="panel"><h2>查看论文</h2><button onclick="loadPapers()">刷新当前身份可见论文</button><pre id="papers"></pre></section></div>
+<script>
+const headers={"Content-Type":"application/json","X-User-Id":document.querySelector("#user").value};
+document.querySelector("#user").onchange=e=>headers["X-User-Id"]=e.target.value;
+async function api(url,opt={}){const r=await fetch(url,{...opt,headers});return await r.json()}
+async function submitPaper(){const p=await api("/api/papers",{method:"POST",body:JSON.stringify({title:title.value,abstract:abstract.value})});alert(JSON.stringify(p,null,2))}
+async function loadPapers(){papers.textContent=JSON.stringify(await api("/api/papers"),null,2)}
+</script></body></html>
